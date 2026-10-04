@@ -1,0 +1,200 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux-aarch64:
+    name: Build Linux AArch64 (glibc)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            ninja-build \
+            gcc-aarch64-linux-gnu \
+            g++-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu \
+            file
+
+      - name: Configure
+        run: |
+          set -euxo pipefail
+
+          rm -rf build
+
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
+            -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++
+
+      - name: Build
+        run: |
+          set -euxo pipefail
+          cmake --build build --parallel 2
+
+      - name: Package
+        run: |
+          set -euxo pipefail
+
+          BIN="$(find build \
+            -type f \
+            -executable \
+            ! -path '*/CMakeFiles/*' \
+            -print -quit)"
+
+          test -n "$BIN"
+
+          echo "Binary: $BIN"
+          file "$BIN"
+          aarch64-linux-gnu-readelf -h "$BIN"
+
+          mkdir -p dist
+
+          TAG="${GITHUB_REF_NAME}"
+          OUT="dist/${{github.event.repository.name}}-${TAG}-linux-aarch64"
+
+          cp "$BIN" "$OUT"
+          sha256sum "$OUT" > "${OUT}.sha256"
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-aarch64
+          path: dist/*
+
+
+  build-android-aarch64:
+    name: Build Android AArch64 (NDK)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Android NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: ''
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            ninja-build \
+            file
+
+      - name: Configure
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          rm -rf build
+
+          NDK="${ANDROID_NDK_HOME}"
+          TOOLCHAIN="${NDK}/build/cmake/android.toolchain.cmake"
+
+          test -f "$TOOLCHAIN"
+
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-35
+
+      - name: Build
+        run: |
+          set -euxo pipefail
+          cmake --build build --parallel 2
+
+      - name: Package
+        run: |
+          set -euxo pipefail
+
+          BIN="$(find build \
+            -type f \
+            -executable \
+            ! -path '*/CMakeFiles/*' \
+            -print -quit)"
+
+          test -n "$BIN"
+
+          echo "Binary: $BIN"
+          file "$BIN"
+
+          mkdir -p dist
+
+          TAG="${GITHUB_REF_NAME}"
+          OUT="dist/${{github.event.repository.name}}-${TAG}-android-aarch64"
+
+          cp "$BIN" "$OUT"
+          sha256sum "$OUT" > "${OUT}.sha256"
+
+      - name: Upload Android artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-aarch64
+          path: dist/*
+
+
+  release:
+    name: Create GitHub Release
+    needs:
+      - build-linux-aarch64
+      - build-android-aarch64
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-aarch64
+          path: dist
+
+      - name: Download Android artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: android-aarch64
+          path: dist
+
+      - name: Verify checksums
+        run: |
+          set -euxo pipefail
+
+          ls -lh dist
+          sha256sum -c dist/*.sha256
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+
+          #cd "$GITHUB_WORKSPACE"
+
+          TAG="${GITHUB_REF_NAME}"
+
+          gh release create "$TAG" \
+            "dist/${{github.event.repository.name}}-${TAG}-linux-aarch64" \
+            "dist/${{github.event.repository.name}}-${TAG}-linux-aarch64.sha256" \
+            "dist/${{github.event.repository.name}}-${TAG}-android-aarch64" \
+            "dist/${{github.event.repository.name}}-${TAG}-android-aarch64.sha256" \
+            --title "$TAG" \
+            --generate-notes
